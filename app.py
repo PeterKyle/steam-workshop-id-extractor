@@ -107,7 +107,7 @@ def extract_ids(urls):
         workshop_id_match = WORKSHOP_ID_REGEX.search(url)
         workshop_id = workshop_id_match.group(1) if workshop_id_match else "N/A"
         
-        mod_id = "Not Found"
+        mod_ids = []
         if workshop_id != "N/A":
             try:
                 # 2. Fetch Page Content
@@ -121,29 +121,33 @@ def extract_ids(urls):
                     if desc_div:
                         # Use separator to ensure words stay separate
                         desc_text = desc_div.get_text(separator=' ')
-                        # Refined regex: capture text after "Mod ID:" until the next space or line break
-                        mod_id_match = re.search(r"(?:Mod ID:|ModID:)\s*([^\s\r\n|]+)", desc_text, re.IGNORECASE)
-                        if mod_id_match:
-                            mod_id = mod_id_match.group(1).strip()
-                        else:
-                            # Fallback: check raw text
-                            fallback_match = re.search(r"(?:Mod ID:|ModID:)\s*([^\s\r\n|]+)", response.text, re.IGNORECASE)
-                            if fallback_match:
-                                mod_id = fallback_match.group(1).strip()
+                        # Find ALL Mod IDs
+                        mod_ids = re.findall(r"(?:Mod ID:|ModID:)\s*([^\s\r\n|]+)", desc_text, re.IGNORECASE)
+                    
+                    if not mod_ids:
+                        # Fallback: check raw text
+                        mod_ids = re.findall(r"(?:Mod ID:|ModID:)\s*([^\s\r\n|]+)", response.text, re.IGNORECASE)
+                    
+                    if not mod_ids:
+                        mod_ids = ["Not Found"]
                 elif response.status_code == 429:
-                    mod_id = "Error: Rate Limited (429). Wait 1 min."
-                    st.error("Steam is rate-limiting your requests. I'll pause extra long between the next ones.")
-                    time.sleep(5) # Extra pause on 429
+                    mod_ids = ["Error: Rate Limited (429). Wait 1 min."]
+                    st.error(f"Steam is rate-limiting your requests (URL: {url}). I'll pause extra long.")
+                    time.sleep(5) 
                 else:
-                    mod_id = f"Error: HTTP {response.status_code}"
+                    mod_ids = [f"Error: HTTP {response.status_code}"]
             except Exception as e:
-                mod_id = f"Error: {str(e)}"
-        
-        results.append({
-            "Workshop ID": workshop_id,
-            "Mod ID": mod_id,
-            "URL": url
-        })
+                mod_ids = [f"Error: {str(e)}"]
+        else:
+            mod_ids = ["N/A"]
+
+        # 4. Add a record for EACH Mod ID found (Duplicates Workshop ID if needed)
+        for mid in mod_ids:
+            results.append({
+                "Workshop ID": workshop_id,
+                "Mod ID": mid.strip(),
+                "URL": url
+            })
         
         progress_bar.progress((i + 1) / len(urls))
         # Rate limiting: 5-second pause to be extremely safe
