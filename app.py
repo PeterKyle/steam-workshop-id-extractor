@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import re
 import pandas as pd
 import time
+from streamlit_sortables import sort_items
 
 # Page Configuration
 st.set_page_config(
@@ -53,6 +54,16 @@ st.markdown("""
         border: 1px solid #30363d;
         margin-top: 10px;
     }
+    /* Fix for streamlit-sortables visibility in Dark Mode */
+    .sortable-item {
+        color: #ffffff !important;
+        background-color: #161b22 !important;
+        border: 1px solid #30363d !important;
+        border-radius: 5px !important;
+        padding: 10px !important;
+        margin-bottom: 5px !important;
+        font-weight: 500 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -63,18 +74,31 @@ Extract **Workshop IDs** and **Mod IDs** from Steam Workshop pages in bulk.
 Paste your URLs below (one per line) and click **Process URLs**.
 """)
 
-# Session State for Input
+# Session State Initializations
 if 'urls_input' not in st.session_state:
     st.session_state.urls_input = ""
+if 'all_results' not in st.session_state:
+    st.session_state.all_results = []
 
 def clear_text():
     st.session_state.urls_input = ""
+
+def reset_results():
+    st.session_state.all_results = []
 
 # Sidebar / Instructions
 with st.sidebar:
     st.header("How to use")
     st.info("1. Paste Steam Workshop URLs into the text area.\n2. Click 'Process URLs'.\n3. Copy the semicolon-separated lists or download the CSV.")
-    st.button("🗑️ Clear All", on_click=clear_text)
+    
+    st.markdown("### 🛠 Tools")
+    st.button("🗑️ Clear URL Input", on_click=clear_text)
+    st.button("🧹 Reset Results List", on_click=reset_results)
+    
+    if st.session_state.all_results:
+        # Count enabled vs total
+        enabled_count = sum(1 for r in st.session_state.all_results if r.get('Enabled', True))
+        st.success(f"Total results: {len(st.session_state.all_results)} ({enabled_count} enabled)")
 
 # Input Area
 urls_text = st.text_area("Workshop URLs", value=st.session_state.urls_input, height=200, key="urls_input_area", help="One URL per line")
@@ -144,6 +168,8 @@ def extract_ids(urls):
         # 4. Add a record for EACH Mod ID found (Duplicates Workshop ID if needed)
         for mid in mod_ids:
             results.append({
+                "Enabled": True,
+                "Order": len(st.session_state.all_results) + len(results) + 1,
                 "Workshop ID": workshop_id,
                 "Mod ID": mid.strip(),
                 "URL": url
@@ -162,28 +188,106 @@ if st.button("🚀 Process URLs"):
     if not urls_list:
         st.warning("Please enter at least one URL.")
     else:
-        results = extract_ids(urls_list)
-        df = pd.DataFrame(results)
+        new_results = extract_ids(urls_list)
+        st.session_state.all_results.extend(new_results)
+        st.toast(f"✅ Added {len(new_results)} results to the list!")
+        st.rerun()
+
+# Display logic for accumulated results
+if st.session_state.all_results:
+    df = pd.DataFrame(st.session_state.all_results)
+    
+    # Result Displays
+    st.divider()
+    st.subheader("🛠 Mod Management Table")
+    st.markdown("Use the **'Enabled'** checkbox to toggle mods. They will stay in this list but be **omitted** from the final output below.")
+    
+    # Use data_editor for interactive reordering and deletion
+    edited_df = st.data_editor(
+        df,
+        width="stretch",
+        num_rows="dynamic",
+        column_order=["Enabled", "Order", "Workshop ID", "Mod ID", "URL"],
+        disabled=["Workshop ID", "URL"], # Keep these fixed
+        key="results_editor"
+    )
+    
+    # Check for changes in the data editor
+    if not edited_df.equals(df):
+        old_results = st.session_state.all_results
+        new_results_df = edited_df.copy()
         
-        # Result Displays
-        st.subheader("Results Table")
-        st.dataframe(df, use_container_width=True)
+        # 1. Handle Deletions/Additions implicitly or explicitly? 
+        # Actually, let's just use the current edited_df as the source of truth
+        # and re-normalize if needed.
         
-        # Semicolon-separated lists
-        st.subheader("Formatted Lists")
-        
-        # Ensure correct order by iterating through the results
-        workshop_ids = [str(r['Workshop ID']) for r in results if r['Workshop ID'] != "N/A"]
-        mod_ids = [str(r['Mod ID']) for r in results if r['Mod ID'] != "Not Found" and not str(r['Mod ID']).startswith("Error")]
-        
-        # Note: The user said "Make sure Workshop ID1 and ModID1 are from the same URL"
-        # Since I'm processing sequentially, I should probably keep them aligned.
-        # If I filter out failures, they might get misaligned if one mod has a workshop ID but no mod ID.
-        # Let's keep them perfectly aligned by including placeholders if necessary, OR
-        # just join them based on the dataframe which is already ordered.
-        
-        workshop_list_str = ";".join(df['Workshop ID'].tolist()) + ";"
-        mod_list_str = ";".join(df['Mod ID'].tolist()) + ";"
+        if len(edited_df) != len(df):
+            # Row was deleted
+            new_results = new_results_df.to_dict('records')
+            # Reset order numbers to be sequential
+            for idx, r in enumerate(new_results):
+                r["Order"] = idx + 1
+            st.session_state.all_results = new_results
+            st.rerun()
+            
+        else:
+            # Check for specific row Order changes to apply "Smart Shifting"
+            changed_idx = -1
+            new_order_val = -1
+            
+            for i in range(len(df)):
+                if edited_df.iloc[i]["Order"] != df.iloc[i]["Order"]:
+                    changed_idx = i
+                    new_order_val = int(edited_df.iloc[i]["Order"])
+                    break
+            
+            if changed_idx != -1:
+                # Mod 8 was changed to 3:
+                # 1. Pop the item at changed_idx
+                # 2. Insert it at new_order_val - 1
+                temp_results = old_results.copy()
+                moved_item = temp_results.pop(changed_idx)
+                
+                # Target index is based on the new order value
+                target_idx = max(0, min(len(temp_results), new_order_val - 1))
+                temp_results.insert(target_idx, moved_item)
+                
+                # 3. Re-normalize all order numbers
+                for idx, r in enumerate(temp_results):
+                    r["Order"] = idx + 1
+                    
+                st.session_state.all_results = temp_results
+                st.rerun()
+            else:
+                # Other edits (like toggling 'Enabled' or changing 'Mod ID')
+                st.session_state.all_results = edited_df.to_dict('records')
+                st.rerun()
+
+    # --- DRAG AND DROP REORDERING (Commented Out for now) ---
+    # st.subheader("🔃 Drag-and-Drop Reorder")
+    # with st.expander("Open Reorder Menu"):
+    #     st.info("Grab a mod and drag it to swap positions. This will automatically update your table and final lists!")
+    #     sortable_items = [f"{r['Mod ID']} (Workshop ID: {r['Workshop ID']})" for r in st.session_state.all_results if r.get('Enabled', True)]
+    #     new_sorted_labels = sort_items(sortable_items, direction="vertical", key="drag_reorder")
+    #     if new_sorted_labels != sortable_items:
+    #         lookup = {f"{r['Mod ID']} (Workshop ID: {r['Workshop ID']})": r for r in st.session_state.all_results}
+    #         new_all_results = []
+    #         for idx, label in enumerate(new_sorted_labels):
+    #             record = lookup[label]
+    #             record["Order"] = idx + 1
+    #             new_all_results.append(record)
+    #         st.session_state.all_results = new_all_results
+    #         st.rerun()
+
+    # Final Display Logic (Filter by Enabled)
+    df = pd.DataFrame(st.session_state.all_results)
+    active_df = df[df["Enabled"] == True]
+    
+    # Semicolon-separated lists
+    st.subheader("📋 Final Formatted Lists")
+    if not active_df.empty:
+        workshop_list_str = ";".join(active_df['Workshop ID'].astype(str).tolist()) + ";"
+        mod_list_str = ";".join(active_df['Mod ID'].astype(str).tolist()) + ";"
         
         col1, col2 = st.columns(2)
         with col1:
@@ -195,13 +299,16 @@ if st.button("🚀 Process URLs"):
             st.code(mod_list_str, language="text")
             
         # CSV Download Button
-        csv = df.to_csv(index=False).encode('utf-8')
+        csv = active_df.to_dict('records')
+        csv_df = pd.DataFrame(csv)
         st.download_button(
-            label="📥 Download CSV",
-            data=csv,
-            file_name='steam_workshop_ids.csv',
+            label="📥 Download Enabled Mods (CSV)",
+            data=csv_df.to_csv(index=False).encode('utf-8'),
+            file_name='enabled_steam_workshop_ids.csv',
             mime='text/csv',
         )
+    else:
+        st.warning("No mods are currently enabled. Check the 'Enabled' box in the table above to include them.")
 
 st.divider()
 st.caption("Developed with ❤️ for Steam Workshop enthusiasts.")
